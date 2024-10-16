@@ -1,0 +1,647 @@
+<script lang="ts">
+    import { onMount, createEventDispatcher } from 'svelte';
+     import * as d3 from 'd3';
+     import type { Selection } from 'd3';
+    import "carbon-components-svelte/css/all.css";
+ 
+     interface RPDData {
+         Year: string;
+         RPD: string;
+         "RPD PRV": string;
+     }
+ 
+     interface ConstellationEntry {
+         Year: string;
+         id: string;
+         name: string;
+         Sponsor: string;
+         "Drug Name": string;
+         "Treatment Type"?: string;
+         Purchased: string;
+         Month: string;
+         Date: string;
+     }
+ 
+     let containerWidth: number;
+     let containerHeight: number;
+     $: width = Math.max(containerWidth || 1825, 800);
+     $: height = Math.max(containerHeight || 1825, 800);
+ 
+     export let data: RPDData[];
+     export let constellationData: ConstellationEntry[];
+     export let summaryDisplayComponent: any;
+     export let overviewYear: string = "Overview";
+ 
+     export let transitionDuration: number = 400;
+     export let transitionEase: (t: number) => number = d3.easeCircle;
+ 
+     let animatedYears = new Set();
+ 
+     let svg: Selection<SVGSVGElement, unknown, null, undefined>;
+     let currentYear: string = overviewYear;
+     
+     let isZoomed = false;
+ 
+     let summaryInstance: any;
+     let visitedYears = new Set();
+ 
+     let tooltipContent = {
+         drugName: '',
+         sponsor: '',
+         therapeuticArea: '',
+         date: ''
+     };
+ 
+     const dispatch = createEventDispatcher();
+
+     const therapeuticAreaColors = {
+         "Gastroenterology": "#39FF14",
+         "Neurology": "#4D4DFF",
+         "Ophthalmology": "#E79028",
+         "Immunology": "#EA38A5",
+         "Metabolic": "#133B11",
+         "Dermatology": "#559368",
+         "Hematology": "#CF3630",
+         "Orthopedics": "#441780",
+         "Pulmonology": "#CBC09F",
+         "Nephrology": "#ACA3DB",
+         "Oncology": "#FF84DE",
+         "Genetic": "#4D4DFF",
+         "Hepatology": "#FF00D4",
+     };
+     $: margin = { 
+         top: height * 0.05, 
+         right: width * 0.175, 
+         bottom: height * 0.0425, 
+         left: width * 0.175 
+     };
+     $: innerRadius = Math.min(width, height) * 0.029;
+     $: outerRadius = Math.min(width, height) / 1.625 - Math.max(margin.top, margin.right, margin.bottom, margin.left);
+ 
+     const years = [...new Set(data.map(d => d.Year))].sort((a, b) => +a - +b);
+     const allYears = [overviewYear, ...years];
+ 
+     const maxRPD = Math.max(...data.map(d => +d.RPD));
+     const rpdPrvCounts = constellationData.reduce((acc, entry) => {
+         acc[entry.Year] = (acc[entry.Year] || 0) + 1;
+         return acc;
+     }, {} as Record<string, number>);
+     data = data.map(item => ({
+         ...item,
+         "RPD PRV": rpdPrvCounts[item.Year]?.toString() || "0"
+     }));
+ 
+     currentYear = overviewYear;
+     
+     $: xScale = d3.scaleBand()
+         .range([0, 2 * Math.PI])
+         .align(0)
+         .domain(allYears);
+ 
+     $: yScale = d3.scaleLog()
+         .range([innerRadius, outerRadius])
+         .domain([1, maxRPD]);
+ 
+     const colorScale = d3.scaleOrdinal(d3.schemeCategory10);
+ 
+     const groupedConstellationData = d3.group(constellationData, d => d.Year);
+ 
+ 
+     $: barWidth = Math.min(width, height) * 0.0025;
+ 
+     let yearSegments: Selection<SVGPathElement, string, SVGGElement, unknown>;
+     let yearLabels: Selection<SVGTextElement, string, SVGGElement, unknown>;
+ 
+     let activeYear: string = overviewYear;
+let hoveredYear: string | null = null;
+ 
+     onMount(() => {
+        svg = d3.select("#radial-timeline")
+             .attr("width", width)
+             .attr("height", height)
+             .append("g")
+             .attr("transform", `translate(${width / 2},${height / 2})`);
+ 
+         drawTimeline();
+         drawYearCircle();
+         placeSummaryDisplay();
+ 
+         svg.on("click", handleSvgClick);
+         window.addEventListener("keydown", handleKeyDown);
+         window.addEventListener("resize", handleResize);
+ 
+         // Set initial view to Overview
+         updateVisibility(overviewYear);
+         dispatch('yearChange', { year: overviewYear });
+
+         const handleResizeWrapper = () => handleResize();
+    window.addEventListener("resize", handleResizeWrapper);
+
+    return () => {
+        window.removeEventListener("keydown", handleKeyDown);
+        window.removeEventListener("resize", handleResizeWrapper);
+    };
+ 
+     });
+ 
+     function getColor(name: string): string {
+         return therapeuticAreaColors[name] || "#000000";
+     }
+ 
+     function handleResize() {
+    width = Math.max(containerWidth || 1825, 800);
+    height = Math.max(containerHeight || 1825, 800);
+    drawTimeline();
+    drawYearCircle();
+    setTimeout(() => {
+        drawTimeline();
+        drawYearCircle();
+    }, 0);
+}
+ 
+     function placeSummaryDisplay() {
+         if (summaryDisplayComponent) {
+             const summaryContainer = d3.select("#summary-display-container");
+             
+             summaryInstance = new summaryDisplayComponent({target: summaryContainer.node(),
+                 props: {
+                     currentYear,
+                     constellationData,
+                     rpdPrvData: data
+                 }
+             });
+         }
+     }
+ 
+     function drawYearCircle() {
+         const yearCircleRadius = outerRadius + width * 0.0167;
+         const segmentArc = d3.arc<string>()
+             .innerRadius(yearCircleRadius)
+             .outerRadius(yearCircleRadius + width * 0.0033)
+             .startAngle((d, i) => xScale(d)!)
+             .endAngle((d, i) => xScale(d)! + xScale.bandwidth());
+ 
+         // Remove existing year segments and labels
+         svg.selectAll(".year-segment").remove();
+         svg.selectAll(".year-label").remove();
+ 
+         yearSegments = svg.append("g")
+             .selectAll("path")
+             .data(allYears)
+             .enter()
+             .append("path")
+             .attr("d", segmentArc)
+             .attr("fill", d => d === overviewYear ? "#fff" : "#fff")
+             .attr("stroke", "#ccc")
+             .attr("stroke-width", width * 0.0005)
+             .attr("class", d => `year-segment year-segment-${d}`)
+             .style("cursor", "pointer")
+             .on("click", handleYearClick);
+ 
+         yearLabels = svg.append("g")
+             .selectAll("text")
+             .data(allYears)
+             .enter()
+             .append("text")
+             .attr("x", d => Math.sin(xScale(d)! + xScale.bandwidth() / 2) * (yearCircleRadius + width * 0.0417))
+             .attr("y", d => -Math.cos(xScale(d)! + xScale.bandwidth() / 2) * (yearCircleRadius + width * 0.0167))
+             .attr("text-anchor", "middle")
+             .attr("alignment-baseline", "middle")
+             .text(d => d)
+             .attr("font-size", `${width * 0.00833}px`)
+             .attr("fill", d => d === overviewYear ? "#C9623F" : "#666")
+             .attr("font-weight", d => d === overviewYear ? "bold" : "normal")
+             .attr("class", d => `year-label year-label-${d}`)
+             .style("cursor", "pointer")
+             .on("click", handleYearClick);
+     }
+     
+     let hoveredPetalData: {
+         name: string;
+         id: string;
+         drugName: string;
+     } | null = null;
+ 
+     function handlePetalHover(entry: ConstellationEntry) {
+         hoveredPetalData = {
+             name: entry.name,
+             id: entry.id,
+             drugName: entry["Drug Name"]
+         };
+         dispatch('petalHover', entry);
+         if (summaryDisplayComponent) {
+             summaryDisplayComponent.updateHoveredData(hoveredPetalData);
+         }
+     }
+    
+     function handlePetalLeave() {
+         hoveredPetalData = null;
+         dispatch('petalLeave');
+         if (summaryDisplayComponent) {
+             summaryDisplayComponent.updateHoveredData(null);
+         }
+     }
+     
+     function updateVisibility(year: string) {
+         allYears.forEach(y => {
+             const isActiveYear = y === year;
+             const saturation = isActiveYear ? 1 : 0.125;
+ 
+             svg.selectAll(`.year-${y}, .cluster-${y}`)
+                 .transition()
+                 .duration(transitionDuration)
+                 .ease(transitionEase)
+                 .style("filter", `saturate(${saturation})`)
+                 .style("opacity", 1);
+ 
+             yearSegments.filter(d => d === y)
+                 .attr("stroke", isActiveYear ? "#C9623F": "#ccc")
+                 .attr("stroke-width", isActiveYear ? 1.2 : .5)
+                 .attr("fill", d => d === overviewYear ? "#C9623F" : (isActiveYear ? "#C9623F" : "none"));
+ 
+             yearLabels.filter(d => d === y)
+                 .attr("fill", isActiveYear ? "#C9623F": "#666")
+                 .attr("font-weight", d => d === overviewYear ? "bold" : (isActiveYear ? "800" : "normal"));
+         });
+      
+         if (summaryInstance) {
+             summaryInstance.$set({ currentYear: year });
+         }
+     }
+ 
+     function drawTimeline() {
+         // Remove existing elements
+         svg.selectAll("*").remove();
+   
+         svg.append("g")
+             .selectAll("line")
+             .data(data)
+             .enter()
+             .append("line")
+             .attr("class", d => `year-${d.Year} timeline-line`)
+             .attr("stroke", d => colorScale(d.Year))
+             .attr("stroke-width", barWidth)
+             .attr("x1", d => {
+                 const angle = xScale(d.Year) + xScale.bandwidth() / 2;
+                 return Math.sin(angle) * innerRadius;
+             })
+             .attr("y1", d => {
+                 const angle = xScale(d.Year) + xScale.bandwidth() / 2;
+                 return -Math.cos(angle) * innerRadius;
+             })
+             .attr("x2", d => {
+                 const angle = xScale(d.Year) + xScale.bandwidth() / 2;
+                 return Math.sin(angle) * yScale(Math.max(1, +d.RPD));
+             })
+             .attr("y2", d => {
+                 const angle = xScale(d.Year) + xScale.bandwidth() / 2;
+                 return -Math.cos(angle) * yScale(Math.max(1, +d.RPD));
+             });
+ 
+         svg.append("g")
+             .selectAll("circle")
+             .data(data)
+             .enter()
+             .append("circle")
+             .attr("class", d => `year-${d.Year}`)
+             .attr("cx", d => {
+                 const angle = xScale(d.Year) + xScale.bandwidth() / 2;
+                 return Math.sin(angle) * yScale(Math.max(1, +d.RPD));
+             })
+             .attr("cy", d => {
+                 const angle = xScale(d.Year) + xScale.bandwidth() / 2;
+                 return -Math.cos(angle) * yScale(Math.max(1, +d.RPD));
+             })
+             .attr("r", 5)
+             .attr("fill", d => colorScale(d.Year));
+ 
+         const logBase = 1.5;
+         const guideLines = d3.range(Math.floor(Math.log(maxRPD) / Math.log(logBase)) + 1)
+             .map(i => Math.pow(logBase, i));
+ 
+         svg.append("g")
+             .selectAll("circle")
+             .data(guideLines)
+             .enter()
+             .append("circle")
+             .attr("cx", 0)
+             .attr("cy", 0)
+             .attr("r", d => yScale(d))
+             .attr("fill", "none")
+             .attr("stroke", "#ccc")
+             .attr("stroke-dasharray", "3,3")
+             .style("opacity", 0.5);
+ 
+         svg.append("g")
+             .selectAll("text")
+             .data(guideLines)
+             .enter()
+             .append("text")
+             .attr("x", 0)
+             .attr("y", d => -yScale(d))
+             .text(d => d3.format(".0s")(d))
+             .attr("font-size", "9px")
+             .attr("fill", "#666")
+             .attr("alignment-baseline", "middle");
+ 
+         allYears.forEach(year => {
+             if (year !== overviewYear) {
+                 const yearData = data.find(d => d.Year === year);
+                 if (yearData) {
+                     const entries = groupedConstellationData.get(year) || [];
+                     if (entries.length > 0) {
+                         const angle = xScale(year)! + xScale.bandwidth() / 2;
+                         const radius = yScale(+yearData.RPD);
+                         const x = Math.sin(angle) * radius;
+                         const y = -Math.cos(angle) * radius;
+                         
+                         createPetalCluster(year, entries, { x, y, angle });
+                     }
+                 }
+             }
+         });
+ 
+         drawYearCircle();
+     }
+ 
+     async function createPetalCluster(year: string, entries: ConstellationEntry[], position: { x: number, y: number, angle: number }) {
+    try {
+        const petalCount = Math.min(entries.length, 10);
+        const svgContent = await loadSVG(petalCount);
+        
+        const cluster = svg.append('g')
+            .attr('class', `year-${year} cluster-${year}`)
+            .attr('transform', `translate(${position.x}, ${position.y})`)
+            .attr('cursor', 'pointer')
+            .on('click', (event) => handleClusterClick(event, year))
+            .on('mouseover', (event) => handleClusterHover(event, year))
+            .on('mouseleave', handleClusterLeave);
+
+        cluster.html(svgContent);
+ 
+             const svgElement = cluster.select('svg').node();
+             const viewBox = svgElement.viewBox.baseVal;
+             const svgWidth = viewBox.width;
+             const svgHeight = viewBox.height;
+ 
+             const rotationAngle = (position.angle * 180 / Math.PI);
+            cluster.attr('transform', `
+                translate(${position.x}, ${position.y}) 
+                rotate(${rotationAngle}) 
+                translate(${-svgWidth/2}, ${-svgHeight/2})
+            `);
+
+            addClusterCircle(year, { x: position.x, y: position.y }, Math.max(svgWidth, svgHeight) / 2);
+
+           
+            cluster.selectAll('path')
+                .attr('class', (_, i) => `petal-${year} petal-${year}-${i}`)
+                .each(function(_, i) {
+                    if (i < entries.length) {
+                        const entry = entries[i];
+                        const color = getColor(entry.name);
+                        d3.select(this)
+                            .attr('fill', color)
+                            .attr('stroke', '#C2990D')
+                            .on('mouseover', (event) => {
+                                d3.select(this).attr('opacity', 1);
+                                d3.select(this).attr('transform','rotate(1)');
+                                updateTooltip(event, entry);
+                                handlePetalHover(entry);
+                            })
+                            .on('mouseout', () => {
+                                d3.select(this).attr('opacity', 1);
+                                d3.select(this).attr('transform','rotate(0)')
+                                handlePetalLeave();
+                            })
+                            .on('click', (event) => handleClusterElementClick(event, entry, color));
+                    }
+                });
+
+            } catch (error) {
+            console.error(`Error creating petal cluster for year ${year}:`, error);
+        }
+    }   
+
+    async function loadSVG(petalCount: number): Promise<string> {
+        try {
+            const response = await fetch(`/Petals/${petalCount}Petal.svg`);
+            if (!response.ok) {
+                throw new Error(`HTTP error! status: ${response.status}`);
+            }
+            return await response.text();
+        } catch (error) {
+            console.error("Error loading SVG:", error);
+            return "";
+        }
+    }
+
+    function addClusterCircle(year: string, position: { x: number, y: number }, clusterRadius: number) {
+        const padding = 10.25;
+        const circleRadius = clusterRadius + padding;
+
+        svg.append('circle')
+            .attr('class', `cluster-circle-${year} year-${year}`)
+            .attr('cx', position.x)
+            .attr('cy', position.y)
+            .attr('r', circleRadius)
+            .attr('fill', 'none');
+    }
+
+    function updateTooltip(event: MouseEvent, d: ConstellationEntry | RPDData) {
+        if ('Drug Name' in d) {
+            tooltipContent = {
+                drugName: d["Drug Name"],
+                sponsor: d.Sponsor,
+                therapeuticArea: d.name,
+                date: `${d.Month} ${d.Date}, ${d.Year}`
+            };
+        } else {
+            tooltipContent = {
+                drugName: `Year: ${d.Year}`,
+                sponsor: `RPD: ${d.RPD}`,
+                therapeuticArea: `RPD PRV: ${d["RPD PRV"]}`,
+                date: ''
+            };
+        }
+        dispatch('updateTooltip', tooltipContent);
+    }
+
+    
+    function handleClusterElementClick(event: MouseEvent, entry: ConstellationEntry, color: string) {
+        event.stopPropagation(); // Prevent the cluster click event from firing
+        if (entry.Year !== activeYear) {
+            // If not on the active year, update the year
+            handleClusterClick(event, entry.Year);
+        } else {
+            // If on the active year, open the drawer
+            dispatch('clusterElementClick', { entry, color });
+        }
+    }
+
+    function handleYearClick(event: MouseEvent | null, year: string) {
+        activeYear = year;
+        updateVisibility(year);
+        dispatch('yearChange', { year });
+        if (year !== overviewYear) {
+            zoomToCluster(year);
+        } else {
+            resetZoom();
+        }
+    }
+
+    function handleClusterClick(event: MouseEvent, year: string) {
+        if (year !== activeYear) {
+            activeYear = year;
+            updateVisibility(year);
+            dispatch('yearChange', { year });
+            if (year !== overviewYear) {
+                zoomToCluster(year);
+            } else {
+                resetZoom();
+            }
+        }
+    }
+
+    function handleClusterHover(event: MouseEvent, year: string) {
+        if (year !== activeYear) {
+            hoveredYear = year;
+            highlightYear(year);
+        }
+    }
+
+    function handleClusterLeave(event: MouseEvent) {
+        if (hoveredYear && hoveredYear !== activeYear) {
+            hoveredYear = null;
+            updateVisibility(activeYear);
+        }
+    }
+
+    function highlightYear(year: string) {
+        allYears.forEach(y => {
+            const isHighlightedYear = y === year;
+            const saturation = isHighlightedYear ? 1 : 0.125;
+
+            svg.selectAll(`.year-${y}, .cluster-${y}`)
+                .transition()
+                .duration(transitionDuration)
+                .ease(transitionEase)
+                .style("filter", `saturate(${saturation})`)
+                .style("opacity", 1);
+
+            yearSegments.filter(d => d === y)
+                .attr("stroke", isHighlightedYear ? "#C9623F": "#ccc")
+                .attr("stroke-width", isHighlightedYear ? 1.2 : .5)
+                .attr("fill", d => d === overviewYear ? "#C9623F" : (isHighlightedYear ? "#C9623F" : "none"));
+
+            yearLabels.filter(d => d === y)
+                .attr("fill", isHighlightedYear ? "#C9623F": "#666")
+                .attr("font-weight", d => d === overviewYear ? "bold" : (isHighlightedYear ? "800" : "normal"));
+        });
+    }
+
+    function zoomToCluster(year: string) {
+        const cluster = svg.select(`.cluster-${year}`);
+        if (!cluster.empty()) {
+            const transform = cluster.attr("transform");
+            const scale = 1;
+            
+            svg.transition()
+                .duration(750)
+                .attr("transform", `translate(${width/2},${height/2}) scale(${scale}) translate(${-x},${-y})`);
+
+            isZoomed = true;
+        }
+    }
+
+    function resetZoom() {
+        svg.transition()
+            .duration(750)
+            .attr("transform", `translate(${width/2},${height/2}) scale(1)`);
+        isZoomed = false;
+        dispatch('zoomReset');
+    }
+
+    function handleKeyDown(event: KeyboardEvent) {
+        if (event.key === "Escape" && isZoomed) {
+            resetZoom();
+        }
+    }
+
+    export function navigate(direction: 'prev' | 'next') {
+        const currentIndex = allYears.indexOf(currentYear);
+        let newIndex;
+
+        if (direction === 'next') {
+            newIndex = (currentIndex + 1) % allYears.length;
+        } else { // 'prev'
+            newIndex = (currentIndex - 1 + allYears.length) % allYears.length;
+        }
+
+        currentYear = allYears[newIndex];
+        updateVisibility(currentYear);
+        dispatch('yearChange', { year: currentYear });
+        
+        if (currentYear !== overviewYear) {
+            zoomToCluster(currentYear);
+        } else {
+            resetZoom();
+        }
+    }
+    
+</script>
+
+<div class="timeline-container" 
+    bind:clientWidth={containerWidth} bind:clientHeight={containerHeight}>
+    <svg id="radial-timeline"></svg>
+</div>
+
+<style>
+    .timeline-container {
+        width: 100%;
+        height: 100vh;
+        justify-content: center;
+        align-items: center;
+    }
+
+    :global(.axis text) {
+        font-size: 10px;
+        fill: #666;
+    }
+
+    :global(.grid-lines circle) {
+        opacity: 1;
+        stroke: 2px solid #ccc;
+    }
+
+    :global(.radial-lines line) {
+        opacity: 1;
+    }
+
+    :global(.year-segment) {
+        transition: stroke 0.3s ease;
+    }
+
+    :global(.year-label) {
+        transition: fill 0.3s ease, font-weight 0.3s ease;
+    }
+
+    :global(.timeline-line) {
+        transition: all .25s ease-out;
+    }
+
+    :global(.petal-element, .cluster-circle, .cluster) {
+        transition: filter 0.5s ease-out;
+        cursor: pointer;
+    }
+
+    :global(.year-segment, .year-label) {
+        cursor: pointer;
+        transition: all 0.3s ease;
+    }
+
+    :global(.year-segment:hover, .year-label:hover) {
+        fill: #C9623F;
+        stroke: #C9623F;
+    }
+</style>
